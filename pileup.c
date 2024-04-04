@@ -333,12 +333,6 @@ int main(int argc, char *argv[])
 		n = argc - o.ind; // the number of BAMs on the command line
 		bam_files = argv + o.ind;
 	}
-
-	for(i = 0; i < n; i++){
-		printf("BAM file: %s\n", bam_files[i]);
-	}
-	exit(1);
-
 	data = (aux_t**)calloc(n, sizeof(aux_t*)); // data[i] for the i-th input
 	beg = 0; end = 1<<30; tid = -1;  // set the default region
 	if (reg) {
