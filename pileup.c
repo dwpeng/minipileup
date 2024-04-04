@@ -166,6 +166,87 @@ static void count_alleles(paux_t *pa, int n)
 	}
 }
 
+char** read_bam_list_files(const char* path, int* n)
+{
+	FILE* fp = fopen(path, "r");
+	if (fp == NULL) {
+		fprintf(stderr, "Error: failed to open file %s\n", path);
+		exit(1);
+	}
+	// count files in the file
+	int count_lines = 0;
+	char* line = NULL;
+	char buff[1024] = {0};
+	size_t file_size = 0;
+	size_t max_line_size = 0;
+	size_t line_width = 0;
+	while(!feof(fp)) {
+		int len = fread(buff, sizeof(char), 1024, fp);
+		for (int i = 0; i < len; i++) {
+			max_line_size++;
+			if (buff[i] == '\n') {
+				count_lines++;
+				if (max_line_size > line_width) {
+					line_width = max_line_size;
+				}
+			}
+		}
+		file_size += len;
+	}
+	fseek(fp, 0, SEEK_SET);
+	// read files
+	if(!count_lines){
+		fprintf(stderr, "Error: no bam files found in %s\n", path);
+		exit(1);
+	}
+	char** files = (char**)malloc(count_lines * sizeof(char*));
+	for (int i = 0; i < count_lines; i++) {
+		files[i] = (char*)malloc((line_width + 1) * sizeof(char));
+	}
+	int i = 0;
+	char* data = (char*)malloc(file_size * sizeof(char));
+	fread(data, sizeof(char), file_size, fp);
+	fclose(fp);
+	char* p = data, *q;
+	// does not use ks_getuntil, just read the whole file
+	while (p < data + file_size) {
+		q = p;
+		while (q < data + file_size && *q != '\n' && *q != '\r') {
+			q++;
+		}
+		if (q < data + file_size) {
+			if (q > p && *(q - 1) == '\r')q--;
+			// blank line
+			if(q-p==0){
+				p = q + 1;
+				continue;
+			}
+			strncpy(files[i], p, q - p);
+			files[i][q - p] = '\0';
+			i++;
+			p = q + 1;
+		} else {
+			if(q > p) {
+				strncpy(files[i], p, q - p);
+				files[i][q - p] = '\0';
+				i++;
+			}
+			break;
+		}
+	}
+	free(data);
+	*n = i;
+	if(!i){
+		for(int i = 0; i < count_lines; i++){
+			free(files[i]);
+		}
+		free(files);
+		fprintf(stderr, "Error: no bam files found in %s\n", path);
+		exit(1);
+	}
+	return files;
+}
+
 int main(int argc, char *argv[])
 {
 	int i, j, n, tid, beg, end, pos, *n_plp, baseQ = 0, mapQ = 0, min_len = 0, l_ref = 0, min_support = 1, min_support_strand = 0, min_supp_len = 0;
@@ -180,11 +261,13 @@ int main(int argc, char *argv[])
 	paux_t aux;
 	bam_mplp_t mplp;
 	void *bed = 0;
+	char* bam_list_file = 0;
 	ketopt_t o = KETOPT_INIT;
 
 	// parse the command line
-	while ((n = ketopt(&o, argc, argv, 1, "r:q:Q:l:f:vcCS:s:b:T:ea:yV", 0)) >= 0) {
+	while ((n = ketopt(&o, argc, argv, 1, "r:i:q:Q:l:f:vcCS:s:b:T:ea:yV", 0)) >= 0) {
 		if (n == 'f') { fname = o.arg; fai = fai_load(fname); }
+		else if(n=='i') bam_list_file = o.arg;
 		else if (n == 'b') bed = bed_read(o.arg);
 		else if (n == 'l') min_len = atoi(o.arg); // minimum query length
 		else if (n == 'r') reg = strdup(o.arg);   // parsing a region requires a BAM header
@@ -209,11 +292,13 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "[E::%s] with option -c, the reference genome must be provided.\n", __func__);
 		return 1;
 	}
-	if (o.ind == argc) {
+	if (!bam_list_file && o.ind == argc) {
 		fprintf(stderr, "Usage: minipileup [options] in1.bam [in2.bam [...]]\n");
+		fprintf(stderr, "Usage: minipileup [options] -i list.txt [...]\n");
 		fprintf(stderr, "Options:\n");
 		fprintf(stderr, "  General:\n");
 		fprintf(stderr, "    -f FILE      reference genome [null]\n");
+		fprintf(stderr, "    -i FILE      list of BAM files, every line is a BAM file [null]\n");
 		fprintf(stderr, "    -v           show variants only\n");
 		fprintf(stderr, "    -c           output in the VCF format (force -v)\n");
 		fprintf(stderr, "    -C           show count of each allele on both strands\n");
@@ -233,8 +318,14 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	char** bam_files = 0;
 	// initialize the auxiliary data structures
-	n = argc - o.ind; // the number of BAMs on the command line
+	if(bam_list_file){
+		bam_files = read_bam_list_files(bam_list_file, &n);
+	}else{
+		n = argc - o.ind; // the number of BAMs on the command line
+		bam_files = argv + o.ind;
+	}
 	data = (aux_t**)calloc(n, sizeof(aux_t*)); // data[i] for the i-th input
 	beg = 0; end = 1<<30; tid = -1;  // set the default region
 	if (reg) {
@@ -247,7 +338,7 @@ int main(int argc, char *argv[])
 	for (i = 0; i < n; ++i) {
 		bam_hdr_t *htmp;
 		data[i] = (aux_t*)calloc(1, sizeof(aux_t));
-		data[i]->fp = bgzf_open(argv[o.ind+i], "r"); // open BAM
+		data[i]->fp = bgzf_open(bam_files[i], "r"); // open BAM
 		data[i]->min_mapQ = mapQ;                     // set the mapQ filter
 		data[i]->min_len  = min_len;                  // set the qlen filter
 		data[i]->min_supp_len = min_supp_len;
@@ -406,7 +497,12 @@ int main(int argc, char *argv[])
 	} // ~while()
 	free(n_plp); free(plp);
 	bam_mplp_destroy(mplp);
-
+	if(bam_list_file){
+		for (int i = 0; i < n; i++) {
+			free(bam_files[i]);
+		}
+		free(bam_files);
+	}
 	bam_hdr_destroy(h);
 	for (i = 0; i < n; ++i) {
 		bgzf_close(data[i]->fp);
